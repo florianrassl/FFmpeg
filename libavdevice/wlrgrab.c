@@ -30,12 +30,10 @@
 #include <libdrm/drm.h>
 #include <libdrm/drm_fourcc.h>
 
-/*
 #ifndef _DRM_H_
 #include <drm.h>
 #include <drm_fourcc.h>
 #endif
-*/
 
 #include <xf86drm.h>
 #include <gbm.h>
@@ -61,7 +59,7 @@
 
 
 struct format {
-    enum wl_shm_format wl_format;
+    uint32_t wl_format;
     uint8_t wl_is_bgr;
     enum AVPixelFormat av_format;
 };
@@ -71,7 +69,7 @@ typedef struct{
     void *map_data;
     struct wl_buffer *wl_buffer;
     void *data;
-    enum wl_shm_format format;
+    uint32_t format;
     uint32_t width, height, stride;
     int y_invert;
 } buffer;
@@ -88,7 +86,6 @@ typedef struct WLRGrabContext {
     const AVClass *class;
 
     struct zwlr_screencopy_manager_v1 *screencopy_manager;
-    struct zwlr_screencopy_frame_v1 *frame;
     struct zxdg_output_manager_v1* xdg_output_manager;
     struct zwp_linux_dmabuf_v1* zwp_linux_dmabuf;
 
@@ -118,95 +115,7 @@ typedef struct WLRGrabContext {
 
 } WLRGrabContext;
 
-struct wlrg_buffer_private{
-    const char*         shm_name;
-    int                 shm_fd;
-    struct wl_shm_pool* shm_pool;
-};
-
-struct wlrg_buffer_private wlrg_buffer_private_data = {
-    .shm_name   =   "/wlroots-screencopy_2",
-    .shm_fd     =   -1,
-    .shm_pool   =   NULL,
-};
-
-static int wlrg_buffer_init(struct wlrg_buffer_private *priv,  WLRGrabContext *ctx)
-{
-    av_log(ctx, AV_LOG_DEBUG, "init wlrig_buffer\n");
-
-    priv->shm_fd = shm_open(priv->shm_name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-
-    if (priv->shm_fd < 0) {
-        av_log(ctx, AV_LOG_WARNING, "shm_open failed trying to unlink\n");
-        shm_unlink(priv->shm_name);
-        priv->shm_fd = shm_open(priv->shm_name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
-    }
-
-    if (priv->shm_fd < 0) {
-        av_log(ctx, AV_LOG_ERROR, "shm_open failed\n");
-        return -1;
-    }
-    return 0;
-}
-
-static int wlrg_buffer_resize(struct wlrg_buffer_private *priv, size_t new_size,  WLRGrabContext *ctx)
-{
-    int ret;
-    if (priv->shm_pool == NULL){
-        av_log(ctx, AV_LOG_DEBUG, "create shm_pool\n");
-        priv->shm_pool = wl_shm_create_pool(ctx->shm, priv->shm_fd, new_size);
-    }
-
-    ctx->buffer->data = mmap(NULL, new_size, PROT_READ | PROT_WRITE, MAP_SHARED, priv->shm_fd, 0);
-    if (ctx->buffer->data == MAP_FAILED) {
-        close(priv->shm_fd);
-        av_log(ctx, AV_LOG_ERROR, "mmap failed\n");
-        return -1;
-    }
-
-    wl_shm_pool_resize(priv->shm_pool, new_size);
-    //close(fd);
-
-    shm_unlink(priv->shm_name);
-    while ((ret = ftruncate(priv->shm_fd, new_size)) == EINTR) {
-        // No-op
-    }
-
-    if (ret < 0) {
-        close(priv->shm_fd);
-        av_log(ctx, AV_LOG_ERROR, "ftruncate failed\n");
-        return -1 ;
-    }
-    return 0;
-}
-
-static buffer* wlrg_buffer_create_from_buffer(struct wlrg_buffer_private *priv, buffer *buffer,  WLRGrabContext *ctx)
-{
-    //av_log(ctx, AV_LOG_DEBUG, "create from buffer wlrig_buffer\n");
-
-    buffer->wl_buffer = wl_shm_pool_create_buffer(priv->shm_pool, 0, buffer->width, buffer->height,
-                                                  buffer->stride, buffer->format);
-    if (ctx->buffer->wl_buffer == NULL) {
-        av_log(ctx, AV_LOG_ERROR, "failed to create wl_shm_buffer\n");
-        return NULL;
-    }
-    return buffer;
-}
-
-static void wlrg_buffer_close(struct wlrg_buffer_private *priv, WLRGrabContext *ctx)
-{
-    av_log(ctx, AV_LOG_DEBUG, "close wlrg_buffer\n");
-
-    shm_unlink(priv->shm_name);
-    if(priv->shm_pool){
-        wl_shm_pool_destroy(priv->shm_pool);
-        priv->shm_pool = NULL;
-    }
-    close(priv->shm_fd);
-    priv->shm_fd = 0;
-}
-
-//#define TEST_BO
+#define TEST_BO
 
 static void wlrgrab_free_wl_buffer(void *opaque, uint8_t *data)
 {
@@ -331,25 +240,64 @@ static void handle_global(void *data, struct wl_registry *registry,
 
 static void handle_global_remove(void *data, struct wl_registry *registry,
                                  uint32_t id)
-{
-    WLRGrabContext* ctx = data;
-    if (ctx->output)
-        wl_output_destroy(ctx->output);
-    return;
+{}
+
+static struct wl_buffer *create_shm_buffer(uint32_t fmt, int width, int height,
+                                           int stride, void **data_out, WLRGrabContext *ctx) {
+    void *data;
+    struct wl_shm_pool *pool;
+    struct wl_buffer *buffer;
+    int ret, size = stride * height;
+
+    const char shm_name[] = "/wlroots-screencopy";
+    int fd = shm_open(shm_name, O_RDWR | O_CREAT | O_EXCL, S_IRUSR | S_IWUSR);
+    if (fd < 0) {
+        av_log(ctx, AV_LOG_ERROR, "shm_open failed\n");
+        return NULL;
+    }
+    shm_unlink(shm_name);
+
+    while ((ret = ftruncate(fd, size)) == EINTR) {
+        // No-op
+    }
+    if (ret < 0) {
+        close(fd);
+        av_log(ctx, AV_LOG_ERROR, "ftruncate failed\n");
+        return NULL;
+    }
+
+    data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
+    if (data == MAP_FAILED) {
+        av_log(ctx, AV_LOG_ERROR, "mmap failed\n");
+        close(fd);
+        return NULL;
+    }
+
+    pool = wl_shm_create_pool(ctx->shm, fd, size);
+    close(fd);
+    buffer = wl_shm_pool_create_buffer(pool, 0, width, height,
+                                                         stride, fmt);
+    wl_shm_pool_destroy(pool);
+
+    *data_out = data;
+    return buffer;
 }
 
-static inline buffer *create_buffer(enum wl_shm_format fmt,
-                                    int width, int height, int stride, WLRGrabContext *ctx)
+static buffer* create_buffer(void)
 {
     buffer *buffer;
     buffer = av_mallocz(sizeof (*buffer));
+    return buffer;
+}
 
+static void init_buffer(buffer *buffer, uint32_t fmt,
+                        int width, int height, int stride, WLRGrabContext *ctx)
+{
     buffer->format = fmt;
     buffer->width = width;
     buffer->height = height;
     buffer->stride = stride;
     buffer->bo = NULL;
-    return buffer;
 }
 
 static void frame_handle_buffer(void *data,
@@ -357,9 +305,8 @@ static void frame_handle_buffer(void *data,
                                 uint32_t width, uint32_t height, uint32_t stride)
 {
     WLRGrabContext *ctx = data;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK handle BUFFER\n");
-
-    ctx->buffer = create_buffer(format, width, height, stride, ctx);
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK handle BUFFER\n");
+    init_buffer(ctx->buffer, format, width, height, stride, ctx);
 }
 
 static void frame_handle_linux_dmabuf(void *data,
@@ -367,20 +314,13 @@ static void frame_handle_linux_dmabuf(void *data,
                                       uint32_t width, uint32_t height)
 {
     WLRGrabContext *ctx = data;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK LINUX DMABUF\n");
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK LINUX DMABUF\n");
 
     if (!ctx->drm_fd)
         return;
 
     ctx->have_linux_dmabuf = 1;
-
-    //ctx->buffer = create_buffer(format, width, height, 0, ctx);
-
-    ctx->buffer->format = format;
-    ctx->buffer->width = width;
-    ctx->buffer->height = height;
-    ctx->buffer->stride = 0;
-
+    init_buffer(ctx->buffer, format, width, height, 0, ctx);
 }
 
 static void frame_handle_buffer_done(void *data,
@@ -389,14 +329,14 @@ static void frame_handle_buffer_done(void *data,
     WLRGrabContext *ctx = data;
     uint32_t fd, off, bo_stride;
     uint64_t mod;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK BUFFER DONE\n");
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK BUFFER DONE\n");
     struct zwp_linux_buffer_params_v1 *params;
 
     if (!ctx->have_linux_dmabuf || !ctx->drm_fd) {
-        //av_log(ctx, AV_LOG_DEBUG, "linux-dmabuf is not supported\n");
-        wlrg_buffer_resize(&wlrg_buffer_private_data, ctx->buffer->stride * ctx->buffer->height, ctx);
-        wlrg_buffer_create_from_buffer(&wlrg_buffer_private_data, ctx->buffer, ctx);
-        zwlr_screencopy_frame_v1_copy(ctx->frame, ctx->buffer->wl_buffer);
+        //I don't care if you are slow.
+        ctx->buffer->wl_buffer = create_shm_buffer(ctx->buffer->format, ctx->buffer->width,
+                                        ctx->buffer->height, ctx->buffer->stride, &ctx->buffer->data, ctx);
+        zwlr_screencopy_frame_v1_copy(frame, ctx->buffer->wl_buffer);
         return;
     }
 
@@ -439,14 +379,14 @@ static void frame_handle_buffer_done(void *data,
     zwp_linux_buffer_params_v1_destroy(params);
     close(fd);
 
-    zwlr_screencopy_frame_v1_copy(ctx->frame, ctx->buffer->wl_buffer);
+    zwlr_screencopy_frame_v1_copy(frame, ctx->buffer->wl_buffer);
 }
 
 static void frame_handle_flags(void *data,
                                struct zwlr_screencopy_frame_v1 *frame, uint32_t flags)
 {
     WLRGrabContext *ctx = data;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK FLAGS\n");
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK FLAGS\n");
     ctx->buffer->y_invert = flags & ZWLR_SCREENCOPY_FRAME_V1_FLAGS_Y_INVERT;
 }
 
@@ -455,7 +395,7 @@ static void frame_handle_ready(void *data,
                                uint32_t tv_sec_lo, uint32_t tv_nsec)
 {
     WLRGrabContext *ctx = data;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK READY\n");
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK READY\n");
 
     ctx->buffer_copy_done = 1;
     if(!ctx->have_linux_dmabuf)
@@ -495,7 +435,7 @@ static const struct format formats[] = {
 static int create_stream(AVFormatContext *avctx)
 {
     WLRGrabContext *ctx = avctx->priv_data;
-    //av_log(avctx, AV_LOG_DEBUG, "FUCK careate stream\n");
+    //av_log(avctx, AV_LOG_DEBUG, "DUCK careate stream\n");
 
     int64_t frame_size_bits;
 
@@ -519,7 +459,7 @@ static int create_stream(AVFormatContext *avctx)
     ctx->bpp = 32; //bit per pixel
 
     frame_size_bits = (int64_t)ctx->buffer->width * ctx->buffer->height * ctx->bpp;
-    av_log(ctx, AV_LOG_DEBUG, "FUCK frame_size_bits %ld\n", frame_size_bits);
+    av_log(ctx, AV_LOG_DEBUG, "DUCK frame_size_bits %ld\n", frame_size_bits);
 
     if (frame_size_bits / 8 + AV_INPUT_BUFFER_PADDING_SIZE > INT_MAX) {
         av_log(avctx, AV_LOG_ERROR, "Captured area is too large\n");
@@ -543,7 +483,9 @@ static int create_stream(AVFormatContext *avctx)
 static int capture_frame(AVFormatContext *avctx)
 {
     WLRGrabContext *ctx = avctx->priv_data;
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK capture frame\n");
+    struct zwlr_screencopy_frame_v1 *frame;
+
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK capture frame\n");
 
     static const struct zwlr_screencopy_frame_v1_listener frame_listener = {
         .buffer = frame_handle_buffer,
@@ -554,15 +496,14 @@ static int capture_frame(AVFormatContext *avctx)
                 .failed = frame_handle_failed,
     };
 
-    //ctx->buffer = NULL;
+    ctx->buffer = create_buffer();
     ctx->buffer_copy_done = 0;
-    ctx->frame =
-            zwlr_screencopy_manager_v1_capture_output(ctx->screencopy_manager, 0, ctx->output);
-    zwlr_screencopy_frame_v1_add_listener(ctx->frame, &frame_listener, ctx);
+    frame = zwlr_screencopy_manager_v1_capture_output(ctx->screencopy_manager, 0, ctx->output);
+    zwlr_screencopy_frame_v1_add_listener(frame, &frame_listener, ctx);
 
     while (!ctx->buffer_copy_done && wl_display_dispatch(ctx->display) != -1) {}
 
-    zwlr_screencopy_frame_v1_destroy(ctx->frame);
+    zwlr_screencopy_frame_v1_destroy(frame);
 
     return 0;
 }
@@ -652,8 +593,6 @@ static av_cold int wlrgrab_read_header(AVFormatContext *avctx)
         av_log(ctx, AV_LOG_ERROR, "compositor is missing wl_shm\n");
         return AVERROR(EIO);
     }
-    if (wlrg_buffer_init(&wlrg_buffer_private_data, ctx))
-        return AVERROR((EIO));
 
 #ifdef ENABLE_SCREENCOPY_DMABUF
     if (ctx->zwp_linux_dmabuf == NULL) {
@@ -684,8 +623,12 @@ static av_cold int wlrgrab_read_header(AVFormatContext *avctx)
 
     capture_frame(avctx);
 
+    if(!ctx->have_linux_dmabuf)
+        av_log(ctx, AV_LOG_WARNING, "DMABUF not suported fail back to stupid shm\n");
+
+    //TODO
     if (ctx->buffer->y_invert)
-        av_log(ctx, AV_LOG_DEBUG, "y_invert\n");
+        av_log(ctx, AV_LOG_ERROR, "y_inverted. Doesn't matter if you're Australian\n");
 
     ret = create_stream(avctx);
     if (ret){
@@ -703,7 +646,7 @@ static int wlrgrab_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     int64_t now;
     int err;
 
-    //av_log(ctx, AV_LOG_DEBUG, "FUCK PAK\n");
+    //av_log(ctx, AV_LOG_DEBUG, "DUCK PAK\n");
 
     now = av_gettime_relative();
     if (ctx->frame_last) {
@@ -736,23 +679,17 @@ static int wlrgrab_read_packet(AVFormatContext *avctx, AVPacket *pkt)
     return 0;
 
 fail:
-    wlrg_buffer_close(&wlrg_buffer_private_data, ctx);
     return err;
 }
 
 static av_cold int wlrgrab_read_close(AVFormatContext *avctx)
 {
-    WLRGrabContext *ctx = avctx->priv_data;
-    av_log(ctx, AV_LOG_DEBUG, "FUCK  read close\n");
-
-    /*
     struct output_element* oe;
-    wl_list_for_each(oe, &ctx->output_list, link){
-        av_free(oe);
-    }
-    */
+    WLRGrabContext *ctx = avctx->priv_data;
 
-    wlrg_buffer_close(&wlrg_buffer_private_data, ctx);
+    wl_list_for_each(oe, &ctx->output_list, link){
+        wl_output_destroy(oe->output);
+    }
 
     /*
      * NOPE!!
