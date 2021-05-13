@@ -193,6 +193,8 @@ static av_cold int adpcm_decode_init(AVCodecContext * avctx)
         avctx->sample_fmt = AV_SAMPLE_FMT_S16P;
         break;
     case AV_CODEC_ID_ADPCM_IMA_WS:
+        if (avctx->extradata && avctx->extradata_size >= 2)
+            c->vqa_version = AV_RL16(avctx->extradata);
         avctx->sample_fmt = c->vqa_version == 3 ? AV_SAMPLE_FMT_S16P :
                                                   AV_SAMPLE_FMT_S16;
         break;
@@ -747,6 +749,7 @@ static int get_nb_samples(AVCodecContext *avctx, GetByteContext *gb,
     switch (avctx->codec->id) {
         case AV_CODEC_ID_ADPCM_4XM:
         case AV_CODEC_ID_ADPCM_AGM:
+        case AV_CODEC_ID_ADPCM_IMA_ACORN:
         case AV_CODEC_ID_ADPCM_IMA_DAT4:
         case AV_CODEC_ID_ADPCM_IMA_MOFLEX:
         case AV_CODEC_ID_ADPCM_IMA_ISS:     header_size = 4 * ch;      break;
@@ -1665,6 +1668,23 @@ static int adpcm_decode_frame(AVCodecContext *avctx, void *data,
             }
         }
         break;
+    case AV_CODEC_ID_ADPCM_IMA_ACORN:
+        for (channel = 0; channel < avctx->channels; channel++) {
+            cs = &c->status[channel];
+            cs->predictor  = sign_extend(bytestream2_get_le16u(&gb), 16);
+            cs->step_index = bytestream2_get_le16u(&gb) & 0xFF;
+            if (cs->step_index > 88u){
+                av_log(avctx, AV_LOG_ERROR, "ERROR: step_index[%d] = %i\n",
+                       channel, cs->step_index);
+                return AVERROR_INVALIDDATA;
+            }
+        }
+        for (n = nb_samples >> (1 - st); n > 0; n--) {
+            int byte = bytestream2_get_byteu(&gb);
+            *samples++ = adpcm_ima_expand_nibble(&c->status[0],  byte & 0x0F, 3);
+            *samples++ = adpcm_ima_expand_nibble(&c->status[st], byte >> 4,   3);
+        }
+        break;
     case AV_CODEC_ID_ADPCM_IMA_AMV:
         av_assert0(avctx->channels == 1);
 
@@ -1984,20 +2004,20 @@ static int adpcm_decode_frame(AVCodecContext *avctx, void *data,
                     filter = filter >> 4;
                     if (filter >= FF_ARRAY_ELEMS(xa_adpcm_table))
                         return AVERROR_INVALIDDATA;
-                    flag   = bytestream2_get_byteu(&gb);
+                    flag   = bytestream2_get_byteu(&gb) & 0x7;
 
                     /* Decode 28 samples.  */
                     for (n = 0; n < 28; n++) {
                         int sample = 0, scale;
 
-                        if (flag < 0x07) {
-                            if (n & 1) {
-                                scale = sign_extend(byte >> 4, 4);
-                            } else {
-                                byte  = bytestream2_get_byteu(&gb);
-                                scale = sign_extend(byte, 4);
-                            }
+                        if (n & 1) {
+                            scale = sign_extend(byte >> 4, 4);
+                        } else {
+                            byte  = bytestream2_get_byteu(&gb);
+                            scale = sign_extend(byte, 4);
+                        }
 
+                        if (flag < 0x07) {
                             scale  = scale * (1 << 12);
                             sample = (int)((scale >> shift) + (c->status[channel].sample1 * xa_adpcm_table[filter][0] + c->status[channel].sample2 * xa_adpcm_table[filter][1]) / 64);
                         }
@@ -2160,6 +2180,7 @@ ADPCM_DECODER(AV_CODEC_ID_ADPCM_EA_R1,       sample_fmts_s16p, adpcm_ea_r1,     
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_EA_R2,       sample_fmts_s16p, adpcm_ea_r2,       "ADPCM Electronic Arts R2");
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_EA_R3,       sample_fmts_s16p, adpcm_ea_r3,       "ADPCM Electronic Arts R3");
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_EA_XAS,      sample_fmts_s16p, adpcm_ea_xas,      "ADPCM Electronic Arts XAS");
+ADPCM_DECODER(AV_CODEC_ID_ADPCM_IMA_ACORN,   sample_fmts_s16,  adpcm_ima_acorn,   "ADPCM IMA Acorn Replay");
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_IMA_AMV,     sample_fmts_s16,  adpcm_ima_amv,     "ADPCM IMA AMV");
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_IMA_APC,     sample_fmts_s16,  adpcm_ima_apc,     "ADPCM IMA CRYO APC");
 ADPCM_DECODER(AV_CODEC_ID_ADPCM_IMA_APM,     sample_fmts_s16,  adpcm_ima_apm,     "ADPCM IMA Ubisoft APM");

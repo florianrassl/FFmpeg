@@ -30,6 +30,7 @@
 
 #include "avcodec.h"
 #include "blockdsp.h"
+#include "encode.h"
 #include "fdctdsp.h"
 #include "internal.h"
 #include "mpegvideo.h"
@@ -515,10 +516,9 @@ static av_cold int dnxhd_encode_init(AVCodecContext *avctx)
     ctx->thread[0] = ctx;
     if (avctx->active_thread_type == FF_THREAD_SLICE) {
         for (i = 1; i < avctx->thread_count; i++) {
-            ctx->thread[i] = av_malloc(sizeof(DNXHDEncContext));
+            ctx->thread[i] = av_memdup(ctx, sizeof(DNXHDEncContext));
             if (!ctx->thread[i])
                 return AVERROR(ENOMEM);
-            memcpy(ctx->thread[i], ctx, sizeof(DNXHDEncContext));
         }
     }
 
@@ -1257,7 +1257,7 @@ static int dnxhd_encode_picture(AVCodecContext *avctx, AVPacket *pkt,
     int offset, i, ret;
     uint8_t *buf;
 
-    if ((ret = ff_alloc_packet2(avctx, pkt, ctx->frame_size, 0)) < 0)
+    if ((ret = ff_get_encode_buffer(avctx, pkt, ctx->frame_size, 0)) < 0)
         return ret;
     buf = pkt->data;
 
@@ -1336,7 +1336,7 @@ static av_cold int dnxhd_encode_end(AVCodecContext *avctx)
     av_freep(&ctx->qmatrix_c16);
     av_freep(&ctx->qmatrix_l16);
 
-    if (avctx->active_thread_type == FF_THREAD_SLICE) {
+    if (ctx->thread[1]) {
         for (i = 1; i < avctx->thread_count; i++)
             av_freep(&ctx->thread[i]);
     }
@@ -1354,12 +1354,12 @@ const AVCodec ff_dnxhd_encoder = {
     .long_name      = NULL_IF_CONFIG_SMALL("VC3/DNxHD"),
     .type           = AVMEDIA_TYPE_VIDEO,
     .id             = AV_CODEC_ID_DNXHD,
+    .capabilities   = AV_CODEC_CAP_DR1 | AV_CODEC_CAP_FRAME_THREADS |
+                      AV_CODEC_CAP_SLICE_THREADS,
     .priv_data_size = sizeof(DNXHDEncContext),
     .init           = dnxhd_encode_init,
     .encode2        = dnxhd_encode_picture,
     .close          = dnxhd_encode_end,
-    .capabilities   = AV_CODEC_CAP_SLICE_THREADS | AV_CODEC_CAP_FRAME_THREADS,
-    .caps_internal  = FF_CODEC_CAP_INIT_CLEANUP,
     .pix_fmts       = (const enum AVPixelFormat[]) {
         AV_PIX_FMT_YUV422P,
         AV_PIX_FMT_YUV422P10,
@@ -1370,4 +1370,5 @@ const AVCodec ff_dnxhd_encoder = {
     .priv_class     = &dnxhd_class,
     .defaults       = dnxhd_defaults,
     .profiles       = NULL_IF_CONFIG_SMALL(ff_dnxhd_profiles),
+    .caps_internal  = FF_CODEC_CAP_INIT_THREADSAFE | FF_CODEC_CAP_INIT_CLEANUP,
 };

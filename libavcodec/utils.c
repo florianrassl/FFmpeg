@@ -272,6 +272,16 @@ void avcodec_align_dimensions2(AVCodecContext *s, int *width, int *height,
             w_align = 8;
             h_align = 8;
         }
+        if (s->codec_id == AV_CODEC_ID_MJPEG   ||
+            s->codec_id == AV_CODEC_ID_MJPEGB  ||
+            s->codec_id == AV_CODEC_ID_LJPEG   ||
+            s->codec_id == AV_CODEC_ID_SMVJPEG ||
+            s->codec_id == AV_CODEC_ID_AMV     ||
+            s->codec_id == AV_CODEC_ID_SP5X    ||
+            s->codec_id == AV_CODEC_ID_JPEGLS) {
+            w_align =   8;
+            h_align = 2*8;
+        }
         break;
     case AV_PIX_FMT_BGR24:
         if ((s->codec_id == AV_CODEC_ID_MSZH) ||
@@ -689,6 +699,7 @@ static int get_audio_frame_duration(enum AVCodecID id, int sr, int ch, int ba,
                     return 0;
                 return frame_bytes * 28;
             case AV_CODEC_ID_ADPCM_4XM:
+            case AV_CODEC_ID_ADPCM_IMA_ACORN:
             case AV_CODEC_ID_ADPCM_IMA_DAT4:
             case AV_CODEC_ID_ADPCM_IMA_ISS:
                 return (frame_bytes - 4 * ch) * 2 / ch;

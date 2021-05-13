@@ -365,7 +365,33 @@ struct AVStreamInternal {
      * last packet in packet_buffer for this stream when muxing.
      */
     struct PacketList *last_in_packet_buffer;
+
+    int64_t last_IP_pts;
+    int last_IP_duration;
+
+    /**
+     * Number of packets to buffer for codec probing
+     */
+    int probe_packets;
+
+    /* av_read_frame() support */
+    enum AVStreamParseType need_parsing;
+    struct AVCodecParserContext *parser;
+
+    /**
+     * Number of frames that have been demuxed during avformat_find_stream_info()
+     */
+    int codec_info_nb_frames;
+
+    /**
+     * Stream Identifier
+     * This is the MPEG-TS stream identifier +1
+     * 0 means unknown
+     */
+    int stream_identifier;
 };
+
+void avpriv_stream_set_need_parsing(AVStream *st, enum AVStreamParseType type);
 
 #ifdef __GNUC__
 #define dynarray_add(tab, nb_ptr, elem)\

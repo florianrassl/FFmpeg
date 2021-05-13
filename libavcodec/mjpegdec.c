@@ -138,7 +138,6 @@ av_cold int ff_mjpeg_decode_init(AVCodecContext *avctx)
     s->buffer        = NULL;
     s->start_code    = -1;
     s->first_picture = 1;
-    s->seen_sof      = 0;
     s->got_picture   = 0;
     s->orig_height    = avctx->coded_height;
     avctx->chroma_sample_location = AVCHROMA_LOC_CENTER;
@@ -430,7 +429,6 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
         memcpy(s->h_count, h_count, sizeof(h_count));
         memcpy(s->v_count, v_count, sizeof(v_count));
         s->interlaced = 0;
-        s->seen_sof = 0;
         s->got_picture = 0;
 
         /* test interlaced mode */
@@ -584,7 +582,7 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
         case 0x43000000:
         case 0x44000000:
             if(s->bits <= 8)
-                s->avctx->pix_fmt = AV_PIX_FMT_GRAY8;
+                s->avctx->pix_fmt = s->force_pal8 ? AV_PIX_FMT_PAL8 : AV_PIX_FMT_GRAY8;
             else
                 s->avctx->pix_fmt = AV_PIX_FMT_GRAY16;
             break;
@@ -683,13 +681,11 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
             } else if (s->nb_components != 1) {
                 av_log(s->avctx, AV_LOG_ERROR, "Unsupported number of components %d\n", s->nb_components);
                 return AVERROR_PATCHWELCOME;
-            } else if (s->bits <= 8) {
-                avpriv_set_systematic_pal2(s->palette, s->avctx->pix_fmt);
-                if (s->palette_index)
-                    s->avctx->pix_fmt = AV_PIX_FMT_PAL8;
-                else
-                    s->avctx->pix_fmt = AV_PIX_FMT_GRAY8;
-            } else
+            } else if (s->palette_index && s->bits <= 8 || s->force_pal8)
+                s->avctx->pix_fmt = AV_PIX_FMT_PAL8;
+            else if (s->bits <= 8)
+                s->avctx->pix_fmt = AV_PIX_FMT_GRAY8;
+            else
                 s->avctx->pix_fmt = AV_PIX_FMT_GRAY16;
         }
 
@@ -723,12 +719,29 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
         if (s->avctx->skip_frame == AVDISCARD_ALL) {
             s->picture_ptr->pict_type = AV_PICTURE_TYPE_I;
             s->picture_ptr->key_frame = 1;
-            s->seen_sof               = 1;
+            s->got_picture            = 1;
             return 0;
         }
-    }
 
-    s->seen_sof = 1;
+        av_frame_unref(s->picture_ptr);
+        if (ff_get_buffer(s->avctx, s->picture_ptr, AV_GET_BUFFER_FLAG_REF) < 0)
+            return -1;
+        s->picture_ptr->pict_type = AV_PICTURE_TYPE_I;
+        s->picture_ptr->key_frame = 1;
+        s->got_picture            = 1;
+
+        // Lets clear the palette to avoid leaving uninitialized values in it
+        if (s->avctx->pix_fmt == AV_PIX_FMT_PAL8)
+            memset(s->picture_ptr->data[1], 0, 1024);
+
+        for (i = 0; i < 4; i++)
+            s->linesize[i] = s->picture_ptr->linesize[i] << s->interlaced;
+
+        ff_dlog(s->avctx, "%d %d %d %d %d %d\n",
+                s->width, s->height, s->linesize[0], s->linesize[1],
+                s->interlaced, s->avctx->height);
+
+    }
 
     if ((s->rgb && !s->lossless && !s->ls) ||
         (!s->rgb && s->ls && s->nb_components > 1) ||
@@ -753,6 +766,18 @@ int ff_mjpeg_decode_sof(MJpegDecodeContext *s)
             s->block_stride[i] = bw * s->h_count[i];
         }
         memset(s->coefs_finished, 0, sizeof(s->coefs_finished));
+    }
+
+    if (s->avctx->hwaccel) {
+        s->hwaccel_picture_private =
+            av_mallocz(s->avctx->hwaccel->frame_priv_data_size);
+        if (!s->hwaccel_picture_private)
+            return AVERROR(ENOMEM);
+
+        ret = s->avctx->hwaccel->start_frame(s->avctx, s->raw_image_buffer,
+                                             s->raw_image_buffer_size);
+        if (ret < 0)
+            return ret;
     }
 
     return 0;
@@ -1609,42 +1634,10 @@ int ff_mjpeg_decode_sos(MJpegDecodeContext *s, const uint8_t *mb_bitmask,
     const int block_size = s->lossless ? 1 : 8;
     int ilv, prev_shift;
 
-    if (!s->seen_sof) {
+    if (!s->got_picture) {
         av_log(s->avctx, AV_LOG_WARNING,
                 "Can not process SOS before SOF, skipping\n");
         return -1;
-    }
-
-    if (!s->got_picture || !s->interlaced || !(s->bottom_field == !s->interlace_polarity)) {
-        av_frame_unref(s->picture_ptr);
-        if (ff_get_buffer(s->avctx, s->picture_ptr, AV_GET_BUFFER_FLAG_REF) < 0)
-            return -1;
-        s->picture_ptr->pict_type = AV_PICTURE_TYPE_I;
-        s->picture_ptr->key_frame = 1;
-
-        for (i = 0; i < 4; i++)
-            s->linesize[i] = s->picture_ptr->linesize[i] << s->interlaced;
-
-        if (s->picture_ptr->format == AV_PIX_FMT_PAL8)
-            memcpy(s->picture_ptr->data[1], s->palette, sizeof(s->palette));
-
-        s->got_picture = 1;
-
-        ff_dlog(s->avctx, "%d %d %d %d %d %d\n",
-                s->width, s->height, s->linesize[0], s->linesize[1],
-                s->interlaced, s->avctx->height);
-
-        if (s->avctx->hwaccel && !s->hwaccel_picture_private) {
-            s->hwaccel_picture_private =
-                av_mallocz(s->avctx->hwaccel->frame_priv_data_size);
-            if (!s->hwaccel_picture_private)
-                return AVERROR(ENOMEM);
-
-            ret = s->avctx->hwaccel->start_frame(s->avctx, s->raw_image_buffer,
-                                                 s->raw_image_buffer_size);
-            if (ret < 0)
-                return ret;
-        }
     }
 
     if (reference) {
@@ -2409,6 +2402,8 @@ int ff_mjpeg_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     int ret = 0;
     int is16bit;
 
+    s->force_pal8 = 0;
+
     if (avctx->codec_id == AV_CODEC_ID_SMVJPEG && s->smv_next_frame > 0)
         return smv_process_frame(avctx, frame);
 
@@ -2422,7 +2417,7 @@ int ff_mjpeg_receive_frame(AVCodecContext *avctx, AVFrame *frame)
     ret = mjpeg_get_packet(avctx);
     if (ret < 0)
         return ret;
-
+redo_for_pal8:
     buf_ptr = s->pkt->data;
     buf_end = s->pkt->data + s->pkt->size;
     while (buf_ptr < buf_end) {
@@ -2553,6 +2548,8 @@ int ff_mjpeg_receive_frame(AVCodecContext *avctx, AVFrame *frame)
             if (!CONFIG_JPEGLS_DECODER ||
                 (ret = ff_jpegls_decode_lse(s)) < 0)
                 goto fail;
+            if (ret == 1)
+                goto redo_for_pal8;
             break;
         case EOI:
 eoi_parser:
@@ -2560,14 +2557,9 @@ eoi_parser:
                 s->progressive && s->cur_scan && s->got_picture)
                 mjpeg_idct_scan_progressive_ac(s);
             s->cur_scan = 0;
-            if (!s->seen_sof) {
+            if (!s->got_picture) {
                 av_log(avctx, AV_LOG_WARNING,
                        "Found EOI before any SOF, ignoring\n");
-                break;
-            }
-            if (!s->got_picture && avctx->skip_frame != AVDISCARD_ALL) {
-                av_log(avctx, AV_LOG_WARNING,
-                       "Found EOI before any SOS, ignoring\n");
                 break;
             }
             if (s->interlaced) {
@@ -2577,7 +2569,6 @@ eoi_parser:
                     break;
             }
             if (avctx->skip_frame == AVDISCARD_ALL) {
-                s->seen_sof = 0;
                 s->got_picture = 0;
                 ret = AVERROR(EAGAIN);
                 goto the_end_no_picture;
@@ -2591,7 +2582,6 @@ eoi_parser:
             }
             if ((ret = av_frame_ref(frame, s->picture_ptr)) < 0)
                 return ret;
-            s->seen_sof = 0;
             s->got_picture = 0;
 
             frame->pkt_dts = s->pkt->dts;
@@ -2652,7 +2642,6 @@ skip:
     av_log(avctx, AV_LOG_FATAL, "No JPEG data found in image\n");
     return AVERROR_INVALIDDATA;
 fail:
-    s->seen_sof = 0;
     s->got_picture = 0;
     return ret;
 the_end:
@@ -2943,7 +2932,6 @@ av_cold int ff_mjpeg_decode_end(AVCodecContext *avctx)
 static void decode_flush(AVCodecContext *avctx)
 {
     MJpegDecodeContext *s = avctx->priv_data;
-    s->seen_sof = 0;
     s->got_picture = 0;
 
     s->smv_next_frame = 0;

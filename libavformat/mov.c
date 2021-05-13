@@ -2186,7 +2186,7 @@ static void mov_parse_stsd_audio(MOVContext *c, AVIOContext *pb,
             switch (st->codecpar->codec_id) {
             case AV_CODEC_ID_MP2:
             case AV_CODEC_ID_MP3:
-                st->need_parsing = AVSTREAM_PARSE_FULL;
+                st->internal->need_parsing = AVSTREAM_PARSE_FULL;
                 break;
             }
         }
@@ -2424,10 +2424,10 @@ static int mov_finalize_stsd_codec(MOVContext *c, AVIOContext *pb,
     case AV_CODEC_ID_VC1:
     case AV_CODEC_ID_VP8:
     case AV_CODEC_ID_VP9:
-        st->need_parsing = AVSTREAM_PARSE_FULL;
+        st->internal->need_parsing = AVSTREAM_PARSE_FULL;
         break;
     case AV_CODEC_ID_AV1:
-        st->need_parsing = AVSTREAM_PARSE_HEADERS;
+        st->internal->need_parsing = AVSTREAM_PARSE_HEADERS;
         break;
     default:
         break;
@@ -2773,8 +2773,8 @@ static int mov_read_stss(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
     if (!entries) {
         sc->keyframe_absent = 1;
-        if (!st->need_parsing && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
-            st->need_parsing = AVSTREAM_PARSE_HEADERS;
+        if (!st->internal->need_parsing && st->codecpar->codec_type == AVMEDIA_TYPE_VIDEO)
+            st->internal->need_parsing = AVSTREAM_PARSE_HEADERS;
         return 0;
     }
     if (sc->keyframes)
@@ -4317,7 +4317,7 @@ static int mov_read_trak(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         && sc->stts_count > 3
         && sc->stts_count*10 > st->nb_frames
         && sc->time_scale == st->codecpar->sample_rate) {
-            st->need_parsing = AVSTREAM_PARSE_FULL;
+            st->internal->need_parsing = AVSTREAM_PARSE_FULL;
     }
     /* Do not need those anymore. */
     av_freep(&sc->chunk_offsets);
@@ -4655,6 +4655,8 @@ static int mov_read_chap(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 
     for (i = 0; i < num && !pb->eof_reached; i++)
         c->chapter_tracks[i] = avio_rb32(pb);
+
+    c->nb_chapter_tracks = i;
 
     return 0;
 }
@@ -5295,34 +5297,6 @@ static int mov_read_tmcd(MOVContext *c, AVIOContext *pb, MOVAtom atom)
     return 0;
 }
 
-static int mov_read_av1c(MOVContext *c, AVIOContext *pb, MOVAtom atom)
-{
-    AVStream *st;
-    int ret;
-
-    if (c->fc->nb_streams < 1)
-        return 0;
-    st = c->fc->streams[c->fc->nb_streams - 1];
-
-    if (atom.size < 4) {
-        av_log(c->fc, AV_LOG_ERROR, "Empty AV1 Codec Configuration Box\n");
-        return AVERROR_INVALIDDATA;
-    }
-
-    /* For now, propagate only the OBUs, if any. Once libavcodec is
-       updated to handle isobmff style extradata this can be removed. */
-    avio_skip(pb, 4);
-
-    if (atom.size == 4)
-        return 0;
-
-    ret = ff_get_extradata(c->fc, st->codecpar, pb, atom.size - 4);
-    if (ret < 0)
-        return ret;
-
-    return 0;
-}
-
 static int mov_read_vpcc(MOVContext *c, AVIOContext *pb, MOVAtom atom)
 {
     AVStream *st;
@@ -5469,6 +5443,11 @@ static int mov_read_coll(MOVContext *c, AVIOContext *pb, MOVAtom atom)
         return 0;
     }
     avio_skip(pb, 3); /* flags */
+
+    if (sc->coll){
+        av_log(c->fc, AV_LOG_WARNING, "Ignoring duplicate COLL\n");
+        return 0;
+    }
 
     sc->coll = av_content_light_metadata_alloc(&sc->coll_size);
     if (!sc->coll)
@@ -6850,7 +6829,7 @@ static const MOVParseTableEntry mov_default_parse_table[] = {
 { MKTAG('A','A','L','P'), mov_read_avid },
 { MKTAG('A','R','E','S'), mov_read_ares },
 { MKTAG('a','v','s','s'), mov_read_avss },
-{ MKTAG('a','v','1','C'), mov_read_av1c },
+{ MKTAG('a','v','1','C'), mov_read_glbl },
 { MKTAG('c','h','p','l'), mov_read_chpl },
 { MKTAG('c','o','6','4'), mov_read_stco },
 { MKTAG('c','o','l','r'), mov_read_colr },
@@ -7644,7 +7623,7 @@ static int mov_read_header(AVFormatContext *s)
             mov->handbrake_version <= 1000000*0 + 1000*10 + 2 &&  // 0.10.2
             st->codecpar->codec_id == AV_CODEC_ID_MP3) {
             av_log(s, AV_LOG_VERBOSE, "Forcing full parsing for mp3 stream\n");
-            st->need_parsing = AVSTREAM_PARSE_FULL;
+            st->internal->need_parsing = AVSTREAM_PARSE_FULL;
         }
     }
 
@@ -7930,9 +7909,7 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
         }
 #if CONFIG_DV_DEMUXER
         if (mov->dv_demux && sc->dv_audio_container) {
-            AVBufferRef *buf = pkt->buf;
             ret = avpriv_dv_produce_packet(mov->dv_demux, pkt, pkt->data, pkt->size, pkt->pos);
-            pkt->buf = buf;
             av_packet_unref(pkt);
             if (ret < 0)
                 return ret;
@@ -7952,9 +7929,9 @@ static int mov_read_packet(AVFormatContext *s, AVPacket *pkt)
                 sc->has_palette = 0;
             }
         }
-        if (st->codecpar->codec_id == AV_CODEC_ID_MP3 && !st->need_parsing && pkt->size > 4) {
+        if (st->codecpar->codec_id == AV_CODEC_ID_MP3 && !st->internal->need_parsing && pkt->size > 4) {
             if (ff_mpa_check_header(AV_RB32(pkt->data)) < 0)
-                st->need_parsing = AVSTREAM_PARSE_FULL;
+                st->internal->need_parsing = AVSTREAM_PARSE_FULL;
         }
     }
 
