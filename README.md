@@ -1,6 +1,7 @@
-FFmpeg wlroots screen graber
+FFmpeg wlroots / sway screen graber
 
 compile:
+
 ./configure   --prefix="$HOME/sway/ffmpeg_build"   --pkg-config-flags="--static"   --extra-cflags="-I$HOME/ffmpeg_build/include"   --extra-ldflags="-L$HOME/ffmpeg_build/lib"   --extra-libs="-lpthread -lm"   --ld="g++"   --bindir="$HOME/bin"   --enable-gpl   --enable-libaom   --enable-libass   --enable-libfdk-aac   --enable-libfreetype   --enable-libmp3lame --enable-libdav1d   --enable-libvorbis   --enable-libx264 --enable-nonfree --enable-libdrm 
 
 make -j4
