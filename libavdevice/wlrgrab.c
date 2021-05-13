@@ -206,7 +206,7 @@ static void wlrg_buffer_close(struct wlrg_buffer_private *priv, WLRGrabContext *
     priv->shm_fd = 0;
 }
 
-#define TEST_BO
+//#define TEST_BO
 
 static void wlrgrab_free_wl_buffer(void *opaque, uint8_t *data)
 {
